@@ -6,13 +6,13 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import registerFanoutChildSubagentExtension from "../../src/extension/fanout-child.ts";
 import { createSubagentExecutor, readNestedRecoveryDescriptor } from "../../src/runs/foreground/subagent-executor.ts";
-import { createNestedRoute, findNestedControlResult, nestedResultsPath, projectNestedEvents, readNestedControlRequests, readNestedControlResults, snapshotNestedEventFiles, writeNestedControlRequest, writeNestedControlResult, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
+import { createNestedRoute, findNestedControlResult, NESTED_EVENTS_DIR, nestedResultsPath, projectNestedEvents, readNestedControlRequests, readNestedControlResults, snapshotNestedEventFiles, writeNestedControlRequest, writeNestedControlResult, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
 import type { ChildRuntimeConfig } from "../../src/runs/shared/child-runtime-config.ts";
 import { ASYNC_DIR, RESULTS_DIR, TEMP_ROOT_DIR, type SubagentState } from "../../src/shared/types.ts";
 import { createRunFanoutBudget } from "../../src/runs/shared/run-fanout-budget.ts";
 import { getArtifactPaths, getArtifactsDir } from "../../src/shared/artifacts.ts";
 import { EXTERNAL_JOB_PROVIDER_REGISTRY_KEY, ExternalJobProviderError, registerExternalJobProvider } from "../../src/api/external-job-provider.ts";
-import { makeAgent } from "../support/helpers.ts";
+import { createMockPi, makeAgent } from "../support/helpers.ts";
 import { externalJobPromptDigest, runExternalJob } from "../../src/runs/shared/external-job-runner.ts";
 import { requestExternalJobOperation, serviceExternalJobBridgeRequests } from "../../src/runs/shared/external-job-bridge.ts";
 import { isActiveAsyncState } from "../../src/runs/background/active-run-index.ts";
@@ -375,6 +375,48 @@ describe("nested control routing", () => {
 			}), false);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("resumes a completed nested async child by its returned run ID", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-async-resume-"));
+		const route = createNestedRoute(`root-async-resume-${randomUUID()}`);
+		routeRoots.push(path.dirname(route.eventSink));
+		const mockPi = createMockPi();
+		mockPi.install();
+		try {
+			const parentSessionFile = path.join(root, "parent.jsonl");
+			fs.writeFileSync(parentSessionFile, "");
+			mockPi.onCall({ output: "initial response" });
+			const executor = createExecutor(createState(), [makeAgent("worker")], false, undefined, fanoutChildRuntime(route));
+			const launch = await executor.execute("launch", {
+				agent: "worker", task: "Initial question", async: true, context: "fresh", acceptance: false,
+			}, new AbortController().signal, undefined, ctx(root, parentSessionFile));
+			assert.equal(launch.isError, undefined, text(launch));
+			const runId = launch.details?.asyncId;
+			assert.ok(runId);
+			assert.equal(launch.details?.runId, runId);
+			assert.ok(launch.details?.asyncDir);
+			assert.equal(path.basename(launch.details.asyncDir), runId);
+			await waitFor(() => projectNestedEvents(route).children.some((child) => child.id === runId && child.state === "complete"), 10_000);
+			const child = projectNestedEvents(route).children.find((entry) => entry.id === runId);
+			const sessionFile = child?.sessionFile ?? child?.steps?.[0]?.sessionFile;
+			assert.ok(sessionFile);
+			assert.equal(fs.realpathSync(sessionFile).split(path.sep).includes(runId), true);
+			assert.equal(path.dirname(path.dirname(sessionFile)), path.join(root, "parent", runId));
+			mockPi.onCall({ output: "follow-up response" });
+			const resumed = await executor.execute("resume", { action: "resume", id: runId, message: "Follow-up question", acceptance: false }, new AbortController().signal, undefined, ctx(root, parentSessionFile));
+			assert.equal(resumed.isError, undefined, text(resumed));
+			const followUpId = resumed.details?.asyncId;
+			assert.ok(followUpId);
+			assert.notEqual(followUpId, runId);
+			assert.doesNotMatch(text(resumed), /session file is not under that nested run's session directory/);
+			await waitFor(() => projectNestedEvents(route).children.some((entry) => entry.id === followUpId && entry.state === "complete"), 10_000);
+		} finally {
+			mockPi.uninstall();
+			fs.rmSync(root, { recursive: true, force: true });
+			fs.rmSync(path.join(TEMP_ROOT_DIR, "nested-subagent-runs", route.rootRunId), { recursive: true, force: true });
+			fs.rmSync(path.join(NESTED_EVENTS_DIR, ".route-index", "roots", route.rootRunId), { recursive: true, force: true });
 		}
 	});
 
