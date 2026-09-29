@@ -3839,23 +3839,24 @@ function resolveWorkflowChildOutputPath(input: {
 	discoverAgents: (cwd: string, scope: AgentScope) => { agents: AgentConfig[] };
 	agents: AgentConfig[];
 	workflowAgentScope?: unknown;
-	state?: SubagentState;
+	deps?: ExecutorDeps;
+	parentSessionFile?: string | null;
 	key: string;
 	params: Record<string, unknown>;
 }): { path?: string; inherited: boolean; resumedOutput?: string } {
 	const rawOutput = input.params.output;
 	const hasExplicitOutput = typeof rawOutput === "string" || typeof rawOutput === "boolean";
 	if (typeof input.params.resume === "string" && (!hasExplicitOutput || rawOutput === true || rawOutput === "true")) {
-		if (!input.state) return { path: undefined, inherited: false };
+		if (!input.deps) return { path: undefined, inherited: false };
 		const index = input.params.index;
-		const target = resolveResumeTarget({
+		const target = resolveRequestedResumeTarget({
 			id: input.params.resume.trim(),
 			...(typeof index === "number" && Number.isInteger(index) ? { index } : {}),
-		}, input.state);
+		}, input.deps, input.parentSessionFile ?? null);
 		const recoveryOutput = "recoveryDescriptor" in target ? target.recoveryDescriptor?.outputPath : undefined;
 		if (hasExplicitOutput) return { path: recoveryOutput, inherited: false };
 		// An output-less foreground resume reuses its recorded output; only an absolute path is known before the new run id exists.
-		const foregroundOutput = target.source === "foreground" ? target.resumeContract?.output : undefined;
+		const foregroundOutput = "source" in target && target.source === "foreground" ? target.resumeContract?.output : undefined;
 		return { path: recoveryOutput, inherited: false, resumedOutput: recoveryOutput ?? (typeof foregroundOutput === "string" && path.isAbsolute(foregroundOutput) ? foregroundOutput : undefined) };
 	}
 	const childCwd = resolveWorkflowChildLocalCwd(input);
@@ -3891,7 +3892,8 @@ function workflowChildOutputClaims(input: {
 	discoverAgents: (cwd: string, scope: AgentScope) => { agents: AgentConfig[] };
 	agents: AgentConfig[];
 	workflowAgentScope?: unknown;
-	state: SubagentState;
+	deps: ExecutorDeps;
+	parentSessionFile: string | null;
 	claimedOutputPaths: Map<string, string>;
 	entries: Array<{ key: string; params: Record<string, unknown> }>;
 }): { error?: string; claims?: Map<string, string>; childClaims?: Map<string, string>; overrides?: Map<string, string> } {
@@ -6218,7 +6220,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 							admit: async (calls, admissionSignal) => {
 								admitEnabledWorkflowChildren(calls);
 								await preflightWorkflowWorktrees({ workflowDefaults: workflowChildDefaults, defaultWorktree: deps.config.worktree, calls, ctxCwd: parentCwd, signal: admissionSignal, deadlineAt: workflowDeadlineAt });
-								const outputClaims = workflowChildOutputClaims({ ctxCwd: parentCwd, workflowCwd, artifactsDir: workflowArtifactsDir, workflowRunId, aggregateOutputPath: workflowAggregateOutputPath, configuredOutputBaseDir, discoverAgents: discoverWorkflowAgents, agents: workflowAgents, workflowAgentScope: workflowChildDefaults.agentScope, state: deps.state, claimedOutputPaths, entries: calls });
+								const outputClaims = workflowChildOutputClaims({ ctxCwd: parentCwd, workflowCwd, artifactsDir: workflowArtifactsDir, workflowRunId, aggregateOutputPath: workflowAggregateOutputPath, configuredOutputBaseDir, discoverAgents: discoverWorkflowAgents, agents: workflowAgents, workflowAgentScope: workflowChildDefaults.agentScope, deps, parentSessionFile: ctx.sessionManager.getSessionFile() ?? null, claimedOutputPaths, entries: calls });
 								if (outputClaims.error) throw new Error(outputClaims.error);
 								status.runFanoutBudget = claimRunFanoutBatch(workflowFanoutBudget, calls.map(({ key }) => `workflow[${key}]`));
 								if (outputClaims.claims) applyWorkflowChildOutputClaims(claimedOutputPaths, outputClaims.claims);
@@ -6530,7 +6532,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 					admit: async (calls, admissionSignal) => {
 						admitEnabledWorkflowChildren(calls);
 						await preflightWorkflowWorktrees({ workflowDefaults: workflowChildDefaults, defaultWorktree: deps.config.worktree, calls, ctxCwd: ctx.cwd, signal: admissionSignal, deadlineAt: workflowDeadlineAt });
-						const outputClaims = workflowChildOutputClaims({ ctxCwd: ctx.cwd, workflowCwd, artifactsDir: workflowArtifactsDir, workflowRunId: foregroundWorkflowRunId, aggregateOutputPath: workflowAggregateOutputPath, configuredOutputBaseDir, discoverAgents: discoverWorkflowAgents, agents: workflowAgents, workflowAgentScope: workflowChildDefaults.agentScope, state: deps.state, claimedOutputPaths, entries: calls });
+						const outputClaims = workflowChildOutputClaims({ ctxCwd: ctx.cwd, workflowCwd, artifactsDir: workflowArtifactsDir, workflowRunId: foregroundWorkflowRunId, aggregateOutputPath: workflowAggregateOutputPath, configuredOutputBaseDir, discoverAgents: discoverWorkflowAgents, agents: workflowAgents, workflowAgentScope: workflowChildDefaults.agentScope, deps, parentSessionFile: ctx.sessionManager.getSessionFile() ?? null, claimedOutputPaths, entries: calls });
 						if (outputClaims.error) throw new Error(outputClaims.error);
 						claimRunFanoutBatch(workflowFanoutBudget, calls.map(({ key }) => `workflow[${key}]`));
 						if (outputClaims.claims) applyWorkflowChildOutputClaims(claimedOutputPaths, outputClaims.claims);
