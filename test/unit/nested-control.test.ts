@@ -420,6 +420,38 @@ describe("nested control routing", () => {
 		}
 	});
 
+	for (const batch of [false, true]) it(`resumes a nested child in workflow ${batch ? "runs.all" : "runs.run"} without output`, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-workflow-resume-"));
+		const route = createNestedRoute(`root-workflow-resume-${randomUUID()}`);
+		routeRoots.push(path.dirname(route.eventSink));
+		const mockPi = createMockPi();
+		mockPi.install();
+		try {
+			const parentSessionFile = path.join(root, "parent.jsonl");
+			fs.writeFileSync(parentSessionFile, "");
+			const executor = createExecutor(createState(), [makeAgent("worker")], false, undefined, fanoutChildRuntime(route));
+			mockPi.onCall({ output: "initial response" });
+			const launch = await executor.execute("launch", { agent: "worker", task: "Initial question", async: true, context: "fresh", acceptance: false, output: path.join(root, "initial.md") }, new AbortController().signal, undefined, ctx(root, parentSessionFile));
+			assert.equal(launch.isError, undefined, text(launch));
+			const runId = launch.details?.asyncId;
+			assert.ok(runId);
+			await waitFor(() => projectNestedEvents(route).children.some((child) => child.id === runId && child.state === "complete"), 10_000);
+			mockPi.onCall({ output: "follow-up response" });
+			const script = batch
+				? `return runs.all([{ key: "follow-up", resume: ${JSON.stringify(runId)}, task: "Continue", acceptance: false }]);`
+				: `return runs.run("follow-up", { resume: ${JSON.stringify(runId)}, task: "Continue", acceptance: false });`;
+			const result = await executor.execute("workflow", { async: false, workflowScript: script }, new AbortController().signal, undefined, ctx(root, parentSessionFile));
+			assert.equal(result.isError, undefined, text(result));
+			assert.doesNotMatch(text(result), /Async run not found/);
+			assert.match(text(result), /follow-up response/);
+		} finally {
+			mockPi.uninstall();
+			fs.rmSync(root, { recursive: true, force: true });
+			fs.rmSync(path.join(TEMP_ROOT_DIR, "nested-subagent-runs", route.rootRunId), { recursive: true, force: true });
+			fs.rmSync(path.join(NESTED_EVENTS_DIR, ".route-index", "roots", route.rootRunId), { recursive: true, force: true });
+		}
+	});
+
 	it("validates terminal nested resume session files before revive", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-terminal-resume-"));
 		try {
