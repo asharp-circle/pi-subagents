@@ -5004,7 +5004,7 @@ export function prepareWorkflowLaunchParams(
 		? undefined
 		: Math.max(1, options.parentDeadlineAt - Date.now());
 	if (typeof childParams.resume === "string") {
-		if (childParams.extensionBindings !== undefined || workflowDefaults.extensionBindings !== undefined) {
+		if (childParams.extensionBindings !== undefined) {
 			throw new Error("extensionBindings is not supported with retained resume; resume uses the original retained child binding.");
 		}
 		if (childParams.gate !== undefined || workflowDefaults.gate !== undefined) {
