@@ -431,11 +431,22 @@ describe("workflow launch params", () => {
 
 	it("rejects extension binding amendments on retained resume items", () => {
 		assert.throws(() => prepareWorkflowLaunchParams(
+			{},
+			{ resume: "retained-run", task: "Continue", extensionBindings: { "custom.policy/1": true } },
+			"workflow-run",
+			"continue",
+		), /original retained child binding/);
+	});
+
+	it("ignores workflow default extension bindings on retained resume items", () => {
+		const result = prepareWorkflowLaunchParams(
 			{ extensionBindings: { "defaults.policy/1": true } },
 			{ resume: "retained-run", task: "Continue" },
 			"workflow-run",
 			"continue",
-		), /original retained child binding/);
+		);
+		assert.equal(result.action, "resume");
+		assert.equal(result.extensionBindings, undefined);
 	});
 
 	it("preserves execution limits and fan-out identity when routing retained resume items", () => {
