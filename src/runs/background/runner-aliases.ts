@@ -18,7 +18,6 @@ export const JITI_ALIAS_ENV = "JITI_ALIAS";
 export const HOST_PEER_ALIASES: ReadonlyArray<{ specifier: string; pkg: string; subpath: string }> = [
 	{ specifier: "@earendil-works/pi-coding-agent", pkg: "@earendil-works/pi-coding-agent", subpath: "." },
 	{ specifier: "@earendil-works/pi-agent-core", pkg: "@earendil-works/pi-agent-core", subpath: "." },
-	{ specifier: "@earendil-works/pi-agent-core/node", pkg: "@earendil-works/pi-agent-core", subpath: "./node" },
 	{ specifier: "@earendil-works/pi-tui", pkg: "@earendil-works/pi-tui", subpath: "." },
 	{ specifier: "@earendil-works/pi-ai", pkg: "@earendil-works/pi-ai", subpath: "./compat" },
 	{ specifier: "@earendil-works/pi-ai/compat", pkg: "@earendil-works/pi-ai", subpath: "./compat" },
@@ -27,6 +26,11 @@ export const HOST_PEER_ALIASES: ReadonlyArray<{ specifier: string; pkg: string; 
 	{ specifier: "typebox", pkg: "typebox", subpath: "." },
 	{ specifier: "typebox/compile", pkg: "typebox", subpath: "./compile" },
 	{ specifier: "typebox/value", pkg: "typebox", subpath: "./value" },
+];
+
+/** Public Pi manifests omit pi-agent-core/node in 1.0.0+ (present in 0.81.0 through 0.99.x). */
+export const AGENT_CORE_NODE_PEER_ALIASES: ReadonlyArray<{ specifier: string; pkg: string; subpath: string }> = [
+	{ specifier: "@earendil-works/pi-agent-core/node", pkg: "@earendil-works/pi-agent-core", subpath: "./node" },
 ];
 
 /** Public Pi manifests introduce chord in 0.85.0 (absent through 0.84.4). */
@@ -136,17 +140,36 @@ export function resolveHostPeerAliases(piPackageRoot: string): { aliases: Record
 	const aliases: Record<string, string> = {};
 	const missing: string[] = [];
 	const hostManifest = readManifest(piPackageRoot);
-	// Only known stable pre-chord versions may omit it. Unknown/prerelease
-	// hosts retain the required aliases, rather than hiding a broken install.
+	// Only known stable pre-chord versions may omit chord, and 1.0+ versions omit pi-agent-core/node.
+	// Unknown/prerelease hosts retain the baseline required aliases.
 	const stableVersion = typeof hostManifest?.version === "string" ? /^0\.(\d+)\.\d+$/.exec(hostManifest.version) : null;
 	const isPreChord = stableVersion !== null && Number(stableVersion[1]) < 85;
-	const required = [...HOST_PEER_ALIASES, ...(isPreChord ? [] : CHORD_PEER_ALIASES)];
+
+	const agentCoreDir = findPeerPackageDir(piPackageRoot, "@earendil-works/pi-agent-core", hostManifest?.name);
+	const agentCoreManifest = agentCoreDir ? readManifest(agentCoreDir) : undefined;
+	const isAgentCore1Plus = typeof agentCoreManifest?.version === "string" && /^[1-9]\d*\./.test(agentCoreManifest.version);
+	const isHost1Plus = typeof hostManifest?.version === "string" && /^[1-9]\d*\./.test(hostManifest.version);
+	const isPi1Plus = isHost1Plus || isAgentCore1Plus;
+
+	const required = [
+		...HOST_PEER_ALIASES,
+		...(isPreChord ? [] : CHORD_PEER_ALIASES),
+		...(isPi1Plus ? [] : AGENT_CORE_NODE_PEER_ALIASES),
+	];
 	for (const { specifier, pkg, subpath } of required) {
 		const packageDir = findPeerPackageDir(piPackageRoot, pkg, hostManifest?.name);
 		const target = packageDir ? resolvePackageSubpath(packageDir, subpath) : undefined;
 		// Native loaders short-circuit resolution, so aliases must retain the real package's dependency scope.
 		if (target && fs.existsSync(target)) aliases[specifier] = fs.realpathSync(target);
 		else missing.push(specifier);
+	}
+	// On Pi 1.0+, alias pi-agent-core/node opportunistically if the installed package provides it.
+	if (isPi1Plus) {
+		for (const { specifier, pkg, subpath } of AGENT_CORE_NODE_PEER_ALIASES) {
+			const packageDir = findPeerPackageDir(piPackageRoot, pkg, hostManifest?.name);
+			const target = packageDir ? resolvePackageSubpath(packageDir, subpath) : undefined;
+			if (target && fs.existsSync(target)) aliases[specifier] = fs.realpathSync(target);
+		}
 	}
 	return { aliases, missing };
 }
