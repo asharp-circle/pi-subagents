@@ -5,6 +5,7 @@ import { afterEach, describe, it } from "node:test";
 import type { AsyncJobState, SubagentState } from "../../src/shared/types.ts";
 import {
 	buildNestedRouteIndex,
+	findNestedRunMatchesById,
 	createNestedRoute,
 	hasLiveNestedDescendants,
 	nestedSummaryFromAsyncStatus,
@@ -494,4 +495,26 @@ describe("nested session-name projection", () => {
 		assert.equal(summary.sessionName, "reviewer: Inspect the changed auth middleware");
 		assert.equal(summary.steps?.[0]?.sessionName, "reviewer: Inspect the changed auth middleware");
 	});
+});
+
+
+it("resolves previous-parent children only within the resumed owner's session root", () => {
+	const route = trackRoute("resume-root");
+	const ownedSessionRoot = path.join(path.dirname(route.eventSink), "sessions", "owner");
+	for (const [id, sessionFile] of [
+		["owned-reviewer", path.join(ownedSessionRoot, "reviewer", "session.jsonl")],
+		["sibling-reviewer", path.join(`${ownedSessionRoot}-sibling`, "session.jsonl")],
+		["outside-reviewer", path.join(ownedSessionRoot, "..", "outside", "session.jsonl")],
+	]) {
+		writeNestedEvent(route, {
+			type: "subagent.nested.completed", ts: 100,
+			parentRunId: "previous-facilitator", parentStepIndex: 1,
+			child: { ...child(id, "complete", 100, "previous-facilitator"), sessionFile },
+		});
+	}
+	const scope = { routes: [route], descendantOf: { parentRunId: "resumed-facilitator" }, ownedSessionRoot };
+	assert.equal(findNestedRunMatchesById("owned-reviewer", { scope }).length, 1);
+	assert.equal(findNestedRunMatchesById("sibling-reviewer", { scope }).length, 0);
+	assert.equal(findNestedRunMatchesById("outside-reviewer", { scope }).length, 0);
+	assert.equal(findNestedRunMatchesById("owned-reviewer", { scope: { ...scope, ownedSessionRoot: undefined } }).length, 0);
 });
