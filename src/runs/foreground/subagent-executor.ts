@@ -631,12 +631,13 @@ function formatForegroundActivity(control: SubagentState["foregroundControls"] e
 	return [`active ${seconds}s ago`, ...facts].join(" | ");
 }
 
-function nestedResolutionScopeForExecutor(deps: ExecutorDeps): NestedRunResolutionScope | undefined {
+function nestedResolutionScopeForExecutor(deps: ExecutorDeps, parentSessionFile?: string | null): NestedRunResolutionScope | undefined {
 	if (deps.allowMutatingManagementActions !== false) return undefined;
 	const route = inheritedNestedRoute(deps);
 	const address = route ? inheritedNestedParentAddress(deps) : undefined;
 	return {
 		routes: route ? [route] : [],
+		...(parentSessionFile ? { ownedSessionRoot: deps.getSubagentSessionRoot(parentSessionFile) } : {}),
 		...(address ? { descendantOf: { parentRunId: address.parentRunId, ...(address.parentStepIndex !== undefined ? { parentStepIndex: address.parentStepIndex } : {}) } } : {}),
 	};
 }
@@ -1871,7 +1872,7 @@ function resolveRequestedResumeTarget(params: SubagentParamsLike, deps: Executor
 	const requestedId = params.id ?? params.runId;
 	let resolved: ResolvedSubagentRunId | undefined;
 	try {
-		resolved = requestedId ? resolveSubagentRunId(requestedId, omitUndefinedProperties({ state: deps.state, nested: nestedResolutionScopeForExecutor(deps) })) : undefined;
+		resolved = requestedId ? resolveSubagentRunId(requestedId, omitUndefinedProperties({ state: deps.state, nested: nestedResolutionScopeForExecutor(deps, parentSessionFile) })) : undefined;
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "";
 		const asyncMatches = message.match(/async:/g)?.length ?? 0;
@@ -4638,7 +4639,9 @@ function workflowChildResult(
 		resumability = { state: "not-resumable", reason: runId ? "resumability was not inspected" : "child produced no run id" };
 	} else {
 		try {
-			const target = resolveResumeTarget({ id: runId }, resumeState, { asyncRequireSessionFile: true, exactOnly: true });
+			const target = result.details.asyncDir
+				? resolveAsyncResumeTarget({ dir: result.details.asyncDir }, { asyncDirRoot: path.dirname(result.details.asyncDir) }, { requireSessionFile: true })
+				: resolveResumeTarget({ id: runId }, resumeState, { asyncRequireSessionFile: true, exactOnly: true });
 			resumability = target.kind === "revive"
 				? { state: "resumable" }
 				: { state: "not-resumable", reason: "child is still running" };
@@ -4770,7 +4773,8 @@ function isMissingWorkflowReceiptDiagnostic(error: unknown, workflowRunId: strin
 		&& error.message.startsWith(`Workflow receipt '${workflowRunId}' is not available because the workflow may still be active or terminal receipt writing failed.`);
 }
 
-function missingWorkflowReceiptResumeHint(reference: WorkflowReceiptResumeReference, state: SubagentState): string | undefined {
+function missingWorkflowReceiptResumeHint(reference: WorkflowReceiptResumeReference, deps: ExecutorDeps, parentSessionFile: string | null): string | undefined {
+	const state = deps.state;
 	try {
 		if (!state.currentSessionId) return undefined;
 		const workflowRunId = reference.workflowRunId.trim();
@@ -4805,7 +4809,7 @@ function missingWorkflowReceiptResumeHint(reference: WorkflowReceiptResumeRefere
 			if (matchingChildren.length === 1 && matchingChildren[0]?.runId !== childRunId) return undefined;
 		}
 
-		const target = resolveResumeTarget({ id: childRunId }, state, { asyncRequireSessionFile: true, exactOnly: true });
+		const target = resolveRequestedResumeTarget({ id: childRunId }, deps, parentSessionFile);
 		if (target.kind !== "revive") return undefined;
 		const hint = `Direct resumable child for workflow key '${reference.key}': subagent({ action: "resume", id: ${JSON.stringify(childRunId)}, message: "..." })`;
 		return Buffer.byteLength(hint, "utf8") <= MAX_WORKFLOW_RESUME_HINT_BYTES ? hint : undefined;
@@ -4854,7 +4858,7 @@ function resolveWorkflowResume(
 	} catch (error) {
 		const workflowRunId = reference.workflowRunId.trim();
 		if (isMissingWorkflowReceiptDiagnostic(error, workflowRunId)) {
-			const hint = missingWorkflowReceiptResumeHint(reference, state);
+			const hint = missingWorkflowReceiptResumeHint(reference, deps, parentSessionFile);
 			if (hint) throw new Error(`${error.message} ${hint}`, { cause: error });
 		}
 		throw error;
@@ -6987,7 +6991,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 					const targetRunId = paramsWithResolvedCwd.id ?? paramsWithResolvedCwd.runId;
 					if (!targetRunId || paramsWithResolvedCwd.dir) throw new Error(`${action} requires id or runId; directory targets are not supported.`);
 					deps.state.currentSessionId = resolveCurrentSessionId(ctx.sessionManager);
-					const target = resolveSubagentRunId(targetRunId, { state: deps.state, nested: nestedResolutionScopeForExecutor(deps) });
+					const target = resolveSubagentRunId(targetRunId, { state: deps.state, nested: nestedResolutionScopeForExecutor(deps, ctx.sessionManager.getSessionFile()) });
 					if (!target) throw new Error(`No run found for '${targetRunId}'.`);
 					return await commandAction({ state: deps.state, target, operation: action.slice("command.".length) as "status" | "yield" | "cancel", index: paramsWithResolvedCwd.index, toolCallId: paramsWithResolvedCwd.toolCallId, signal });
 				} catch (error) {
@@ -7008,7 +7012,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 							: item),
 					};
 				};
-				const nestedScope = nestedResolutionScopeForExecutor(deps);
+				const nestedScope = nestedResolutionScopeForExecutor(deps, ctx.sessionManager.getSessionFile());
 				const sessionRoots = trustedSessionRootsForStatus(ctx, deps);
 				if (action === "debug.run") {
 					if (!targetRunId && !hasDirectoryTarget) {
@@ -7101,7 +7105,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				if (!targetRunId) return { content: [{ type: "text", text: "action='steer' requires id or dir." }], isError: true, details: { mode: "management", results: [] } };
 				let resolved: ResolvedSubagentRunId | undefined;
 				try {
-					resolved = resolveSubagentRunId(targetRunId, omitUndefinedProperties({ state: deps.state, nested: nestedResolutionScopeForExecutor(deps) }));
+					resolved = resolveSubagentRunId(targetRunId, omitUndefinedProperties({ state: deps.state, nested: nestedResolutionScopeForExecutor(deps, ctx.sessionManager.getSessionFile()) }));
 				} catch (error) {
 					const text = error instanceof Error ? error.message : String(error);
 					return { content: [{ type: "text", text }], isError: true, details: { mode: "management", results: [] } };
@@ -7182,7 +7186,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				if (!targetRunId) return { content: [{ type: "text", text: "action='dismiss' requires id." }], isError: true, details: { mode: "management", results: [] } };
 				let resolved: ResolvedSubagentRunId | undefined;
 				try {
-					resolved = resolveSubagentRunId(targetRunId, omitUndefinedProperties({ state: deps.state, nested: nestedResolutionScopeForExecutor(deps) }));
+					resolved = resolveSubagentRunId(targetRunId, omitUndefinedProperties({ state: deps.state, nested: nestedResolutionScopeForExecutor(deps, ctx.sessionManager.getSessionFile()) }));
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					return { content: [{ type: "text", text: message }], isError: true, details: { mode: "management", results: [] } };
@@ -7242,7 +7246,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				}
 				if (!targetRunId) return { content: [{ type: "text", text: "action='stop' requires id or dir." }], isError: true, details: { mode: "management", results: [] } };
 				try {
-					resolved = resolveSubagentRunId(targetRunId, omitUndefinedProperties({ state: deps.state, nested: nestedResolutionScopeForExecutor(deps) }));
+					resolved = resolveSubagentRunId(targetRunId, omitUndefinedProperties({ state: deps.state, nested: nestedResolutionScopeForExecutor(deps, ctx.sessionManager.getSessionFile()) }));
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					return { content: [{ type: "text", text: message }], isError: true, details: { mode: "management", results: [] } };
@@ -7268,7 +7272,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				let resolved: ResolvedSubagentRunId | undefined;
 				if (targetRunId) {
 					try {
-						resolved = resolveSubagentRunId(targetRunId, omitUndefinedProperties({ state: deps.state, nested: nestedResolutionScopeForExecutor(deps) }));
+						resolved = resolveSubagentRunId(targetRunId, omitUndefinedProperties({ state: deps.state, nested: nestedResolutionScopeForExecutor(deps, ctx.sessionManager.getSessionFile()) }));
 					} catch (error) {
 						const message = error instanceof Error ? error.message : String(error);
 						return { content: [{ type: "text", text: message }], isError: true, details: { mode: "management", results: [] } };

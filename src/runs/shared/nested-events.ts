@@ -627,6 +627,7 @@ export function retainNestedLookupRoute(
 
 export interface NestedRunResolutionScope {
 	routes: NestedRoute[];
+	ownedSessionRoot?: string;
 	descendantOf?: { parentRunId: string; parentStepIndex?: number };
 }
 
@@ -639,15 +640,18 @@ function collectNestedRuns(children: NestedRunSummary[] | undefined, output: Nes
 	return output;
 }
 
-function collectScopedNestedRuns(children: NestedRunSummary[] | undefined, scope: NestedRunResolutionScope["descendantOf"], output: NestedRunSummary[] = []): NestedRunSummary[] {
+function collectScopedNestedRuns(children: NestedRunSummary[] | undefined, scope: NestedRunResolutionScope["descendantOf"], ownedSessionRoot?: string, output: NestedRunSummary[] = []): NestedRunSummary[] {
 	if (!scope) return collectNestedRuns(children, output);
 	for (const child of children ?? []) {
-		if (child.parentRunId === scope.parentRunId && (scope.parentStepIndex === undefined || child.parentStepIndex === scope.parentStepIndex)) {
+		const sessionFile = child.sessionFile ?? (child.steps?.length === 1 ? child.steps[0]?.sessionFile : undefined);
+		const relativeSession = ownedSessionRoot && sessionFile ? path.relative(path.resolve(ownedSessionRoot), path.resolve(sessionFile)) : undefined;
+		const ownsSession = relativeSession !== undefined && relativeSession !== "" && relativeSession !== ".." && !relativeSession.startsWith(`..${path.sep}`) && !path.isAbsolute(relativeSession);
+		if (ownsSession || (child.parentRunId === scope.parentRunId && (scope.parentStepIndex === undefined || child.parentStepIndex === scope.parentStepIndex))) {
 			collectNestedRuns([child], output);
 			continue;
 		}
-		collectScopedNestedRuns(child.children, scope, output);
-		collectScopedNestedRuns(child.steps?.flatMap((step) => step.children ?? []), scope, output);
+		collectScopedNestedRuns(child.children, scope, ownedSessionRoot, output);
+		collectScopedNestedRuns(child.steps?.flatMap((step) => step.children ?? []), scope, ownedSessionRoot, output);
 	}
 	return output;
 }
@@ -686,7 +690,7 @@ export function findNestedRunMatchesById(id: string, options: { prefix?: boolean
 	for (const route of options.scope?.routes ?? listNestedRoutes()) {
 		try {
 			const registry = projectNestedEvents(route);
-			for (const run of collectScopedNestedRuns(registry.children, options.scope?.descendantOf)) {
+			for (const run of collectScopedNestedRuns(registry.children, options.scope?.descendantOf, options.scope?.ownedSessionRoot)) {
 				if (options.prefix ? run.id.startsWith(id) : run.id === id) matches.push({ rootRunId: route.rootRunId, route, run });
 			}
 		} catch {

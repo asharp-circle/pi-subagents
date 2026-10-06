@@ -452,6 +452,42 @@ describe("nested control routing", () => {
 		}
 	});
 
+	for (const workflow of [false, true]) it(`resumes a previous facilitator's workflow child via ${workflow ? "runs.run" : "action"}`, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-resumed-facilitator-"));
+		const route = createNestedRoute(`resumed-facilitator-${randomUUID()}`);
+		routeRoots.push(path.dirname(route.eventSink));
+		const mockPi = createMockPi();
+		mockPi.install();
+		try {
+			const sessionFile = path.join(root, "facilitator.jsonl");
+			fs.writeFileSync(sessionFile, "");
+			const original = createExecutor(createState(), [makeAgent("worker")], false, undefined, fanoutChildRuntime(route, "round-one"));
+			mockPi.onCall({ output: "first response" });
+			const launch = await original.execute("launch", { async: false, workflowScript: 'return runs.run("reviewer", { agent: "worker", task: "Review", async: true, context: "fresh", acceptance: false });' }, new AbortController().signal, undefined, ctx(root, sessionFile));
+			assert.equal(launch.isError, undefined, text(launch));
+			const child = launch.details?.workflow?.value as { runId: string; resumability: { state: string } };
+			assert.ok(child.runId);
+			await waitFor(() => projectNestedEvents(route).children.some((entry) => entry.id === child.runId && entry.state === "complete"), 10_000);
+			const resumed = createExecutor(createState(), [makeAgent("worker")], false, undefined, fanoutChildRuntime(route, "round-two"));
+			mockPi.onCall({ output: "second response" });
+			const result = await resumed.execute("resume", workflow
+				? { async: false, workflowScript: `return runs.run("reviewer", { resume: ${JSON.stringify(child.runId)}, task: "Continue", acceptance: false });` }
+				: { action: "resume", id: child.runId, message: "Continue", async: false }, new AbortController().signal, undefined, ctx(root, sessionFile));
+			assert.equal(result.isError, undefined, text(result));
+			assert.doesNotMatch(text(result), /Async run not found/);
+			if (workflow) {
+				assert.match(text(result), /second response/);
+				assert.equal((result.details?.workflow?.value as { resumability: { state: string } }).resumability.state, "resumable", JSON.stringify(result.details?.workflow?.value));
+			}
+			else await waitFor(() => projectNestedEvents(route).children.some((entry) => entry.id === result.details?.asyncId && entry.state === "complete"), 10_000);
+		} finally {
+			mockPi.uninstall();
+			fs.rmSync(root, { recursive: true, force: true });
+			fs.rmSync(path.join(TEMP_ROOT_DIR, "nested-subagent-runs", route.rootRunId), { recursive: true, force: true });
+			fs.rmSync(path.join(NESTED_EVENTS_DIR, ".route-index", "roots", route.rootRunId), { recursive: true, force: true });
+		}
+	});
+
 	it("validates terminal nested resume session files before revive", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-terminal-resume-"));
 		try {
