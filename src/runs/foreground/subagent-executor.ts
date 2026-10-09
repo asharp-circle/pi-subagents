@@ -1503,7 +1503,30 @@ function pathWithin(base: string, candidate: string): boolean {
 	return resolvedCandidate === resolvedBase || resolvedCandidate.startsWith(`${resolvedBase}${path.sep}`);
 }
 
-function validateNestedSessionFile(run: NestedRunSummary, trustedSessionRoots: string[]): string {
+/**
+ * Resumes keep the original session file under a new run ID. The retained recovery descriptor
+ * (written to the run's own async dir) names the original owner via `sessionDir` (`<owner>/async-<owner>`);
+ * accept that owner only when the session file lives inside that exact owner directory.
+ */
+/** @internal exported for tests */
+export function nestedSessionLineageOwnerId(sessionFile: string, recoveryDescriptor: Pick<SteeringRecoveryDescriptor, "sessionDir"> | undefined): string | undefined {
+	const sessionDir = recoveryDescriptor?.sessionDir;
+	if (!sessionDir || !path.isAbsolute(sessionDir)) return undefined;
+	const match = /^async-(.+)$/.exec(path.basename(sessionDir));
+	const ownerId = match?.[1];
+	if (!ownerId || path.basename(path.dirname(sessionDir)) !== ownerId) return undefined;
+	return pathWithin(path.dirname(sessionDir), sessionFile) && path.resolve(sessionFile) !== path.dirname(sessionDir) ? ownerId : undefined;
+}
+
+function canonicalSessionDir(descriptor: SteeringRecoveryDescriptor | undefined, realSessionFile: string): Pick<SteeringRecoveryDescriptor, "sessionDir"> | undefined {
+	const sessionDir = descriptor?.sessionDir;
+	if (!sessionDir || !path.isAbsolute(sessionDir) || !descriptor.sessionFile || !fs.existsSync(descriptor.sessionFile)) return undefined;
+	if (fs.realpathSync(descriptor.sessionFile) !== realSessionFile) return undefined;
+	const parent = path.dirname(sessionDir);
+	return fs.existsSync(parent) ? { sessionDir: path.join(fs.realpathSync(parent), path.basename(sessionDir)) } : undefined;
+}
+
+function validateNestedSessionFile(run: NestedRunSummary, trustedSessionRoots: string[], recoveryDescriptor?: SteeringRecoveryDescriptor): string {
 	const sessionFile = nestedRunSessionFile(run);
 	if (!sessionFile) throw new Error(`Nested run '${run.id}' does not have a persisted session file to resume from.`);
 	if (path.extname(sessionFile) !== ".jsonl") throw new Error(`Nested run '${run.id}' session file must be a .jsonl file: ${sessionFile}`);
@@ -1519,7 +1542,9 @@ function validateNestedSessionFile(run: NestedRunSummary, trustedSessionRoots: s
 	if (!trustedRoots.some((root) => pathWithin(root, realSessionFile))) {
 		throw new Error(`Nested run '${run.id}' session file is outside trusted nested session roots: ${sessionFile}`);
 	}
-	if (!realSessionFile.split(path.sep).includes(run.id)) {
+	const lineageOwnerId = nestedSessionLineageOwnerId(realSessionFile, canonicalSessionDir(recoveryDescriptor, realSessionFile));
+	const components = realSessionFile.split(path.sep);
+	if (!components.includes(run.id) && !(lineageOwnerId && components.includes(lineageOwnerId))) {
 		throw new Error(`Nested run '${run.id}' session file is not under that nested run's session directory: ${sessionFile}`);
 	}
 	return realSessionFile;
@@ -1550,7 +1575,7 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 		agent,
 		index: 0,
 		cwd: asyncDir ? path.dirname(asyncDir) : undefined,
-		sessionFile: validateNestedSessionFile(run, trustedSessionRoots),
+		sessionFile: validateNestedSessionFile(run, trustedSessionRoots, recoveryDescriptor),
 		...(run.capabilityCeiling ? { capabilityCeiling: run.capabilityCeiling } : {}),
 		...(recoveryDescriptor ? { recoveryDescriptor } : {}),
 	});

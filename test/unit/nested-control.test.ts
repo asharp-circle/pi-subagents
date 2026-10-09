@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import registerFanoutChildSubagentExtension from "../../src/extension/fanout-child.ts";
-import { createSubagentExecutor, readNestedRecoveryDescriptor } from "../../src/runs/foreground/subagent-executor.ts";
+import { createSubagentExecutor, readNestedRecoveryDescriptor, nestedSessionLineageOwnerId } from "../../src/runs/foreground/subagent-executor.ts";
 import { createNestedRoute, findNestedControlResult, NESTED_EVENTS_DIR, nestedResultsPath, projectNestedEvents, readNestedControlRequests, readNestedControlResults, snapshotNestedEventFiles, writeNestedControlRequest, writeNestedControlResult, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
 import type { ChildRuntimeConfig } from "../../src/runs/shared/child-runtime-config.ts";
 import { ASYNC_DIR, RESULTS_DIR, TEMP_ROOT_DIR, type SubagentState } from "../../src/shared/types.ts";
@@ -412,6 +412,12 @@ describe("nested control routing", () => {
 			assert.notEqual(followUpId, runId);
 			assert.doesNotMatch(text(resumed), /session file is not under that nested run's session directory/);
 			await waitFor(() => projectNestedEvents(route).children.some((entry) => entry.id === followUpId && entry.state === "complete"), 10_000);
+			mockPi.onCall({ output: "second follow-up response" });
+			const resumedAgain = await executor.execute("resume", { action: "resume", id: followUpId, message: "Second follow-up", acceptance: false }, new AbortController().signal, undefined, ctx(root, parentSessionFile));
+			assert.equal(resumedAgain.isError, undefined, text(resumedAgain));
+			assert.doesNotMatch(text(resumedAgain), /session file is not under that nested run's session directory/);
+			const thirdId = resumedAgain.details?.asyncId;
+			await waitFor(() => projectNestedEvents(route).children.some((entry) => entry.id === thirdId && entry.state === "complete"), 10_000);
 		} finally {
 			mockPi.uninstall();
 			fs.rmSync(root, { recursive: true, force: true });
@@ -567,6 +573,22 @@ describe("nested control routing", () => {
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
+	});
+
+	it("derives resume lineage owner only from a matching recovery sessionDir", () => {
+		const owner = "195584fc-bda5-40a7-8390-616d43242be3";
+		const base = path.join(path.sep, "s", owner);
+		const file = path.join(base, "run-0", "session.jsonl");
+		const sessionDir = path.join(base, `async-${owner}`);
+		assert.equal(nestedSessionLineageOwnerId(file, { sessionDir }), owner);
+		assert.equal(nestedSessionLineageOwnerId(path.join(path.sep, "s", "other", "run-0", "session.jsonl"), { sessionDir }), undefined);
+		assert.equal(nestedSessionLineageOwnerId(file, { sessionDir: path.join(path.sep, "s", "x", `async-${owner}`) }), undefined);
+		assert.equal(nestedSessionLineageOwnerId(file, { sessionDir: path.join(base, "other") }), undefined);
+		assert.equal(nestedSessionLineageOwnerId(file, undefined), undefined);
+		assert.equal(nestedSessionLineageOwnerId(path.join(base, "..", "x", "session.jsonl"), { sessionDir }), undefined);
+		// Exact incident shape
+		const inc = "/h/sessions/p/7d9d/run-0/session/4b3f/run-0/session/" + owner;
+		assert.equal(nestedSessionLineageOwnerId(`${inc}/run-0/session.jsonl`, { sessionDir: `${inc}/async-${owner}` }), owner);
 	});
 
 	it("rejects terminal nested resume session files outside trusted roots", async () => {
