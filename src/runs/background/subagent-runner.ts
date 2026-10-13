@@ -2414,7 +2414,7 @@ export async function runSubagent(
 		}
 	};
 	const isNestedControlDescendant = (run: NestedRunSummary): boolean =>
-		!config.nestedSelf || run.path.some((entry) => entry.runId === id);
+		(!config.nestedSelf && config.nestedRoute?.rootRunId === id) || run.path.some((entry) => entry.runId === id);
 	const interruptNestedAsyncDescendants = (): void => {
 		if (!config.nestedRoute) return;
 		let registry: ReturnType<typeof projectNestedEvents>;

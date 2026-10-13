@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import registerFanoutChildSubagentExtension from "../../src/extension/fanout-child.ts";
 import { createSubagentExecutor, readNestedRecoveryDescriptor, nestedSessionLineageOwnerId } from "../../src/runs/foreground/subagent-executor.ts";
-import { createNestedRoute, findNestedControlResult, NESTED_EVENTS_DIR, nestedResultsPath, nestedRunNotActiveMessage, projectNestedEvents, readNestedControlRequests, readNestedControlResults, snapshotNestedEventFiles, writeNestedControlRequest, writeNestedControlResult, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
+import { createNestedRoute, findLegacyNestedRouteForParentRuns, findNestedControlResult, findNestedRouteForAsyncRun, projectNestedChildrenForRun, NESTED_EVENTS_DIR, nestedResultsPath, nestedRunNotActiveMessage, projectNestedEvents, readNestedControlRequests, readNestedControlResults, snapshotNestedEventFiles, writeNestedControlRequest, writeNestedControlResult, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
 import type { ChildRuntimeConfig } from "../../src/runs/shared/child-runtime-config.ts";
 import { ASYNC_DIR, RESULTS_DIR, TEMP_ROOT_DIR, type SubagentState } from "../../src/shared/types.ts";
 import { createRunFanoutBudget } from "../../src/runs/shared/run-fanout-budget.ts";
@@ -540,6 +540,92 @@ describe("nested control routing", () => {
 			fs.rmSync(path.join(TEMP_ROOT_DIR, "nested-subagent-runs", route.rootRunId), { recursive: true, force: true });
 			fs.rmSync(path.join(NESTED_EVENTS_DIR, ".route-index", "roots", route.rootRunId), { recursive: true, force: true });
 		}
+	});
+
+	it("keys a top-level async route by its public id and rehydrates it on revival without an injected route", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-route-revival-"));
+		const mockPi = createMockPi();
+		mockPi.install();
+		let route: ReturnType<typeof createNestedRoute> | undefined;
+		const asyncIds: string[] = [];
+		try {
+			const sessionFile = path.join(root, "main.jsonl");
+			fs.writeFileSync(sessionFile, "");
+			const executor = createExecutor(createState(), [makeAgent("worker")]);
+			mockPi.onCall({ output: "first" });
+			const launch = await executor.execute("launch", { agent: "worker", task: "Work", async: true, context: "fresh", acceptance: false }, new AbortController().signal, undefined, ctx(root, sessionFile));
+			assert.equal(launch.isError, undefined, text(launch));
+			const runId = launch.details?.asyncId as string;
+			asyncIds.push(runId);
+			await waitFor(() => readStatus(path.join(ASYNC_DIR, runId))?.state === "complete", 10_000);
+			const original = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, runId, "recovery-descriptor.json"), "utf-8"));
+			route = original.nestedRoute;
+			assert.equal(route?.rootRunId, runId);
+			mockPi.onCall({ output: "second" });
+			const revived = await executor.execute("resume", { action: "resume", id: runId, message: "Continue", async: true }, new AbortController().signal, undefined, ctx(root, sessionFile));
+			assert.equal(revived.isError, undefined, text(revived));
+			const revivedId = revived.details?.asyncId as string;
+			asyncIds.push(revivedId);
+			const descriptor = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, revivedId, "recovery-descriptor.json"), "utf-8"));
+			assert.deepEqual(descriptor.nestedRoute, route);
+		} finally {
+			mockPi.uninstall();
+			fs.rmSync(root, { recursive: true, force: true });
+			for (const id of asyncIds) fs.rmSync(path.join(ASYNC_DIR, id), { recursive: true, force: true });
+			if (route) {
+				fs.rmSync(path.dirname(route.eventSink), { recursive: true, force: true });
+				fs.rmSync(path.join(NESTED_EVENTS_DIR, ".route-index", "roots", route.rootRunId), { recursive: true, force: true });
+			}
+		}
+	});
+
+	it("recovers a legacy internal-id route only for a unique caller lineage parent", () => {
+		const lineage = `lineage-${randomUUID()}`;
+		const legacy = createNestedRoute(`internal-${randomUUID()}`);
+		const unrelated = createNestedRoute(`internal-${randomUUID()}`);
+		routeRoots.push(path.dirname(legacy.eventSink), path.dirname(unrelated.eventSink));
+		const child = (route: typeof legacy, parent: string, id: string) => writeNestedEvent(route, {
+			type: "subagent.nested.updated", ts: 100, parentRunId: parent, parentStepIndex: 0,
+			child: { id, parentRunId: parent, parentStepIndex: 0, depth: 1, path: [{ runId: parent, stepIndex: 0 }], state: "complete", agent: "worker", ownerState: "gone" },
+		});
+		child(legacy, lineage, "reviewer-a");
+		child(unrelated, `other-${randomUUID()}`, "reviewer-b");
+		assert.deepEqual(findLegacyNestedRouteForParentRuns([lineage]), legacy);
+		assert.equal(findLegacyNestedRouteForParentRuns([`unknown-${randomUUID()}`]), undefined);
+		child(unrelated, lineage, "reviewer-c");
+		assert.equal(findLegacyNestedRouteForParentRuns([lineage]), undefined, "ambiguous lineage must fail closed");
+	});
+
+	it("resolves an async run's route from its descriptor, falling back to the public id", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-route-descriptor-"));
+		const persisted = createNestedRoute(`internal-${randomUUID()}`);
+		const byId = createNestedRoute(`public-${randomUUID()}`);
+		routeRoots.push(dir, path.dirname(persisted.eventSink), path.dirname(byId.eventSink));
+		try {
+			fs.writeFileSync(path.join(dir, "recovery-descriptor.json"), JSON.stringify({ nestedRoute: persisted }));
+			assert.deepEqual(findNestedRouteForAsyncRun(dir, byId.rootRunId), persisted);
+			fs.writeFileSync(path.join(dir, "recovery-descriptor.json"), JSON.stringify({ nestedRoute: { ...persisted, capabilityToken: randomUUID() } }));
+			assert.deepEqual(findNestedRouteForAsyncRun(dir, byId.rootRunId), byId, "forged token must not resolve");
+			fs.writeFileSync(path.join(dir, "recovery-descriptor.json"), "{not json");
+			assert.deepEqual(findNestedRouteForAsyncRun(dir, byId.rootRunId), byId);
+		} finally {
+			fs.rmSync(path.join(NESTED_EVENTS_DIR, ".route-index", "roots", persisted.rootRunId), { recursive: true, force: true });
+			fs.rmSync(path.join(NESTED_EVENTS_DIR, ".route-index", "roots", byId.rootRunId), { recursive: true, force: true });
+		}
+	});
+
+	it("projects only a revived run's own descendants from a shared route", () => {
+		const route = createNestedRoute(`shared-${randomUUID()}`);
+		routeRoots.push(path.dirname(route.eventSink));
+		const child = (parent: string, id: string) => writeNestedEvent(route, {
+			type: "subagent.nested.updated", ts: 100, parentRunId: parent, parentStepIndex: 0,
+			child: { id, parentRunId: parent, parentStepIndex: 0, depth: 1, path: [{ runId: parent, stepIndex: 0 }], state: "running", agent: "worker", ownerState: "live" },
+		});
+		child("revived", "own-reviewer");
+		child("sibling", "other-reviewer");
+		assert.deepEqual(projectNestedChildrenForRun(route, "revived").map((run) => run.id), ["own-reviewer"]);
+		assert.deepEqual(projectNestedChildrenForRun(route, "stranger"), []);
+		assert.equal(projectNestedChildrenForRun(route, route.rootRunId).length, 2, "route root owns the whole registry");
 	});
 
 	it("validates terminal nested resume session files before revive", async () => {

@@ -21,7 +21,7 @@ import {
 import { readStatus, resolveWatchPath } from "../../shared/utils.ts";
 import { normalizeParallelGroups } from "./parallel-groups.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
-import { findNestedRouteForRootId, hasLiveNestedDescendants, retainNestedLookupRoute, updateAsyncJobNestedProjection } from "../shared/nested-events.ts";
+import { findNestedRouteForAsyncRun, hasLiveNestedDescendants, retainNestedLookupRoute, updateAsyncJobNestedProjection } from "../shared/nested-events.ts";
 import { listAsyncRuns, type AsyncRunSummary } from "./async-status.ts";
 import { EXTERNAL_JOB_BRIDGE_REQUEST_DIR, externalJobBridgeEligibility, serviceExternalJobBridgeRequests } from "../shared/external-job-bridge.ts";
 import { shouldUseNativeFsWatch } from "../../shared/watch-strategy.ts";
@@ -143,9 +143,9 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			throw error;
 		}
 	};
-	const findNestedRouteForJob = (runId: string) => {
+	const findNestedRouteForJob = (runId: string, asyncDir?: string) => {
 		try {
-			return findNestedRouteForRootId(runId);
+			return findNestedRouteForAsyncRun(asyncDir, runId);
 		} catch (error) {
 			console.error(`Failed to resolve nested event route for '${runId}':`, error);
 			return undefined;
@@ -204,7 +204,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			totalTokens: run.totalTokens,
 			sessionFile: run.sessionFile,
 			controlEventCursor: restoredControlEventCursor(run.asyncDir),
-			nestedRoute: findNestedRouteForJob(run.id),
+			nestedRoute: findNestedRouteForJob(run.id, run.asyncDir),
 			nestedChildren: run.nestedChildren,
 			parentWorkflowRunId: run.parentWorkflowRunId,
 			workflowKey: run.workflowKey,

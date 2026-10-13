@@ -330,7 +330,7 @@ export function readAsyncRecoveryDescriptor(asyncDir: string | undefined): Steer
 		"artifactsDir", "maxOutput", "controlConfig", "context", "intercomBridge", "absoluteDeadlineAt", "initialTurnBudget", "initialToolBudget", "maxSubagentDepth", "share", "capabilityCeiling",
 		"launchResolvedExtensions", "runFanoutBudget", "lane", "baseRef", "launcher",
 		"extensionBindings",
-		"requiredExtensions",
+		"requiredExtensions", "nestedRoute",
 	]);
 	for (const field of Object.keys(parsed)) {
 		if (!allowedFields.has(field)) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': unknown field '${field}'.`);
@@ -353,6 +353,12 @@ export function readAsyncRecoveryDescriptor(asyncDir: string | undefined): Steer
 	if (parsed.requiredExtensions !== undefined) {
 		try { parsed.requiredExtensions = snapshotRequiredChildExtensions(parsed.requiredExtensions, "requiredExtensions"); }
 		catch (error) { throw new Error(`Invalid async recovery descriptor '${descriptorPath}': ${error instanceof Error ? error.message : String(error)}`); }
+	}
+	if (parsed.nestedRoute !== undefined) {
+		const route = parsed.nestedRoute as Record<string, unknown> | null;
+		if (!route || typeof route !== "object" || Array.isArray(route) || ["rootRunId", "eventSink", "controlInbox", "capabilityToken"].some((key) => typeof route[key] !== "string" || !(route[key] as string).trim())) {
+			throw new Error(`Invalid async recovery descriptor '${descriptorPath}': nestedRoute is invalid.`);
+		}
 	}
 	if (parsed.lane !== undefined) parsed.lane = normalizeWorkflowLaneMetadata(parsed.lane, `Invalid async recovery descriptor '${descriptorPath}': lane`);
 	if (parsed.agentContract !== undefined) {

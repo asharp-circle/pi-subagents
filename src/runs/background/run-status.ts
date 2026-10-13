@@ -22,7 +22,7 @@ import { resolveAsyncRunLocation } from "./async-resume.ts";
 import { resolveSubagentRunId } from "./run-id-resolver.ts";
 import { flatToLogicalStepIndex, normalizeParallelGroups } from "./parallel-groups.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
-import { attachRootChildrenToSteps, findNestedRouteForRootId, projectNestedRegistryForRoot, type NestedRunResolutionScope } from "../shared/nested-events.ts";
+import { attachRootChildrenToSteps, findNestedRouteForAsyncRun, projectNestedChildrenForRun, type NestedRunResolutionScope } from "../shared/nested-events.ts";
 import { readMissionBinding } from "../../missions/lifecycle.ts";
 import { formatWorkflowJsonPreview } from "../../workflows/scripted-workflow.ts";
 import { parseWorkflowChildSummary } from "../../workflows/workflow-child-summary.ts";
@@ -542,9 +542,9 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 			let nestedChildren: NestedRunSummary[] = [];
 			let nestedWarning: string | undefined;
 			try {
-				const nestedRoute = findNestedRouteForRootId(status.runId);
+				const nestedRoute = findNestedRouteForAsyncRun(asyncDir, status.runId);
 				if (nestedRoute) reconcileNestedAsyncDescendants(nestedRoute, { resultsDir, kill: deps.kill, now: deps.now });
-				nestedChildren = projectNestedRegistryForRoot(status.runId)?.children ?? [];
+				nestedChildren = nestedRoute ? projectNestedChildrenForRun(nestedRoute, status.runId) : [];
 				attachRootChildrenToSteps(status.runId, status.steps, nestedChildren);
 			} catch (error) {
 				nestedWarning = `Nested status unavailable: ${error instanceof Error ? error.message : String(error)}`;

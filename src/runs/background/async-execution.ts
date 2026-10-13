@@ -2127,6 +2127,7 @@ export function executeAsyncSingle(
 	const recoveryDescriptor: SteeringRecoveryDescriptor = {
 		...(ctx.modelResponseAliases ? { modelResponseAliases: ctx.modelResponseAliases } : {}),
 		version: 1,
+		...((nestedRoute ?? inheritedNestedRoute) ? { nestedRoute: nestedRoute ?? inheritedNestedRoute } : {}),
 		...(lane ? { lane } : {}),
 		launchContractDigest,
 		...(extensionBindings ? { extensionBindings } : {}),

@@ -825,6 +825,8 @@ export interface RunFanoutRejection extends RunFanoutBudgetSnapshot {
 }
 
 export interface SteeringRecoveryDescriptor {
+	/** Nested route the run was launched under; revival rehydrates it so descendants keep one registry. */
+	nestedRoute?: NestedRouteInfo;
 	/** Captured response identity authority; absence means no declared aliases on revival. */
 	modelResponseAliases?: Record<string, string[]>;
 	version: 1;

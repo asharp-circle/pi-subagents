@@ -589,6 +589,35 @@ export function findNestedRouteForRootId(rootRunId: string): NestedRoute | undef
 	return undefined;
 }
 
+/**
+ * Legacy recovery for runs launched before descriptors persisted their route: the single route whose
+ * registry holds children parented by one of the caller-owned lineage run ids. Ambiguity fails closed.
+ */
+export function findLegacyNestedRouteForParentRuns(parentRunIds: readonly string[]): NestedRoute | undefined {
+	const ids = new Set(parentRunIds);
+	const matches: NestedRoute[] = [];
+	for (const route of listNestedRoutes()) {
+		try {
+			if (collectNestedRuns(projectNestedEvents(route).children).some((run) => run.parentRunId !== undefined && ids.has(run.parentRunId))) matches.push(route);
+		} catch {
+			continue;
+		}
+	}
+	return matches.length === 1 ? matches[0] : undefined;
+}
+
+/** Route for an async run: the one its recovery descriptor persisted (revived runs), else the public-id lookup. */
+export function findNestedRouteForAsyncRun(asyncDir: string | undefined, runId: string): NestedRoute | undefined {
+	let persisted: NestedRoute | undefined;
+	try {
+		const value = asyncDir ? (JSON.parse(fs.readFileSync(path.join(asyncDir, "recovery-descriptor.json"), "utf-8")) as { nestedRoute?: NestedRoute }).nestedRoute : undefined;
+		persisted = value ? resolveNestedRoute(value) : undefined;
+	} catch {
+		persisted = undefined;
+	}
+	return persisted ?? findNestedRouteForRootId(runId);
+}
+
 export function buildNestedRouteIndex(): Map<string, NestedRoute> {
 	const index = new Map<string, NestedRoute>();
 	for (const route of listNestedRoutes()) {
@@ -985,11 +1014,32 @@ export function attachRootChildrenToSteps<T extends { children?: NestedRunSummar
 	}
 }
 
+/**
+ * Children a run owns in its route's registry. A run that is the route's own root owns all of it; a
+ * run on a shared route (a revived run) owns only the subtrees whose path passes through its id.
+ */
+export function projectNestedChildrenForRun(route: NestedRoute, runId: string): NestedRunSummary[] {
+	const children = projectNestedEvents(route).children;
+	if (route.rootRunId === runId) return children;
+	const owned: NestedRunSummary[] = [];
+	const visit = (nodes: NestedRunSummary[] | undefined): void => {
+		for (const node of nodes ?? []) {
+			if (node.path.some((entry) => entry.runId === runId)) owned.push(node);
+			else {
+				visit(node.children);
+				visit(node.steps?.flatMap((step) => step.children ?? []));
+			}
+		}
+	};
+	visit(children);
+	return owned;
+}
+
 export function updateAsyncJobNestedProjection(job: AsyncJobState): void {
 	if (!job.nestedRoute) return;
-	const registry = projectNestedEvents(job.nestedRoute);
-	job.nestedChildren = registry.children;
-	attachRootChildrenToSteps(job.asyncId, job.steps, registry.children);
+	const children = projectNestedChildrenForRun(job.nestedRoute, job.asyncId);
+	job.nestedChildren = children;
+	attachRootChildrenToSteps(job.asyncId, job.steps, children);
 }
 
 export function updateForegroundNestedProjection(control: SubagentState["foregroundControls"] extends Map<string, infer T> ? T : never): void {

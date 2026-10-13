@@ -104,7 +104,7 @@ import { reconcileAsyncRun } from "../background/stale-run-reconciler.ts";
 import { resolveAsyncRootResultPath, waitForImportedAsyncRoot } from "../background/chain-root-attachment.ts";
 import { awaitExistingAsyncRun, claimWorkflowAwaitedResult } from "../background/await-async-run.ts";
 import { fallbackResultPayloadPathForSessionRun, resultFilePath, retireResultSnapshot, writeAsyncResultFile } from "../background/result-files.ts";
-import { attachRootChildrenToSteps, createNestedRoute, findNestedControlResult, inheritedNestedParentAddressOf, inheritedNestedRouteOf, nestedRunNotActiveMessage, nestedRunScope, resolveNestedAsyncDir, retainNestedLookupRoute, snapshotNestedEventFiles, updateForegroundNestedProjection, writeNestedControlRequest, writeNestedEvent, type NestedParentAddress, type NestedRoute, type NestedRunResolutionScope } from "../shared/nested-events.ts";
+import { attachRootChildrenToSteps, createNestedRoute, findLegacyNestedRouteForParentRuns, resolveNestedRoute, findNestedControlResult, inheritedNestedParentAddressOf, inheritedNestedRouteOf, nestedRunNotActiveMessage, nestedRunScope, resolveNestedAsyncDir, retainNestedLookupRoute, snapshotNestedEventFiles, updateForegroundNestedProjection, writeNestedControlRequest, writeNestedEvent, type NestedParentAddress, type NestedRoute, type NestedRunResolutionScope } from "../shared/nested-events.ts";
 import type { ChildRuntimeConfig } from "../shared/child-runtime-config.ts";
 import { resolveSubagentRunId, type ResolvedSubagentRunId } from "../background/run-id-resolver.ts";
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
@@ -1522,6 +1522,19 @@ export function nestedSessionLineageOwnerId(sessionFile: string, recoveryDescrip
 	return pathWithin(path.dirname(sessionDir), sessionFile) && path.resolve(sessionFile) !== path.dirname(sessionDir) ? ownerId : undefined;
 }
 
+/**
+ * Revival keeps the nested registry of the original launch: the caller's inherited route wins, then
+ * the route persisted in the recovery descriptor. Descriptors written before routes were persisted
+ * fall back to the one route that parents children under this run's own lineage ids.
+ */
+function resolveRevivalNestedRoute(deps: ExecutorDeps, target: { runId: string; sessionFile?: string }, recoveryDescriptor: SteeringRecoveryDescriptor | undefined): NestedRoute | undefined {
+	if (inheritedNestedRoute(deps)) return undefined;
+	if (recoveryDescriptor?.nestedRoute) return resolveNestedRoute(recoveryDescriptor.nestedRoute);
+	if (!recoveryDescriptor) return undefined;
+	const lineageOwnerId = target.sessionFile ? nestedSessionLineageOwnerId(target.sessionFile, recoveryDescriptor) : undefined;
+	return findLegacyNestedRouteForParentRuns([target.runId, ...(lineageOwnerId ? [lineageOwnerId] : [])]);
+}
+
 function canonicalSessionDir(descriptor: SteeringRecoveryDescriptor | undefined, realSessionFile: string): Pick<SteeringRecoveryDescriptor, "sessionDir"> | undefined {
 	const sessionDir = descriptor?.sessionDir;
 	if (!sessionDir || !path.isAbsolute(sessionDir) || !descriptor.sessionFile || !fs.existsSync(descriptor.sessionFile)) return undefined;
@@ -2268,7 +2281,15 @@ async function resumeAsyncRun(input: {
 	const availableModels = input.ctx.modelRegistry.getAvailable().map(toModelInfo);
 	const parentModel = input.parentModel;
 	const revivalAsyncDir = path.join(DIRS.async, runId);
+	let revivalNestedRoute: NestedRoute | undefined;
+	try {
+		revivalNestedRoute = resolveRevivalNestedRoute(input.deps, target, recoveryDescriptor);
+	} catch (error) {
+		activeAsyncCapacity?.rollback();
+		return { content: [{ type: "text", text: `Cannot resume: ${error instanceof Error ? error.message : String(error)}` }], isError: true, details: { mode: "management", results: [] } };
+	}
 	const result = await executeAsyncSingle(runId, compactOptional<Parameters<typeof executeAsyncSingle>[1]>({
+		...(revivalNestedRoute ? { nestedRoute: revivalNestedRoute } : {}),
 		agent: target.agent,
 		task: buildRevivedAsyncTask(target as Parameters<typeof buildRevivedAsyncTask>[0], effectiveFollowUp),
 		goal: effectiveFollowUp,
@@ -7664,7 +7685,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			if (error instanceof RunFanoutLimitError) return runFanoutErrorResult(error, foregroundMode);
 			return buildRequestedModeError(effectiveParams, error instanceof Error ? error.message : String(error));
 		}
-		const nestedRoute = inheritedNestedRouteValue ?? createNestedRoute(runId);
+		const nestedRoute = inheritedNestedRouteValue ?? createNestedRoute(effectiveAsync ? asyncRunId : runId);
 
 		const artifactConfig: ArtifactConfig = omitUndefinedProperties({
 			...DEFAULT_ARTIFACT_CONFIG,

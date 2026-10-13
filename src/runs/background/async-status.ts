@@ -6,7 +6,7 @@ import { formatActivityLabel, formatParallelOutcome } from "../../shared/status-
 import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type CostSummary, type Details, type HostStepNode, type HostStepState, type LaunchResolvedChildExtensions, type RuntimeAcknowledgedChildExtensions, type NestedRunSummary, type SteeringStatus, type SubagentRunMode, type TimeoutRecoveryProjection, type TokenUsage, type TurnBudgetState, type UsageBudgetState, type WorktreeNaming, type WorkflowPreflight, type WorkflowGraphSnapshot } from "../../shared/types.ts";
 import type { ResolvedSubagentCapabilityCeiling, SubagentCapabilityAudit } from "../shared/capability-ceiling.ts";
 import { readStatus } from "../../shared/utils.ts";
-import { attachRootChildrenToSteps, buildNestedRouteIndex, findNestedRouteForRootId, type NestedRoute, projectNestedEvents } from "../shared/nested-events.ts";
+import { attachRootChildrenToSteps, buildNestedRouteIndex, findNestedRouteForAsyncRun, projectNestedChildrenForRun, findNestedRouteForRootId, type NestedRoute, projectNestedEvents } from "../shared/nested-events.ts";
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
 import { formatRunFanoutBudget, getRunFanoutBudgetSnapshot, readRunFanoutBudgetDescriptor } from "../shared/run-fanout-budget.ts";
 import { flatToLogicalStepIndex, normalizeParallelGroups } from "./parallel-groups.ts";
@@ -321,7 +321,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 		try {
 			// The route is resolved by the caller via buildNestedRouteIndex, so this
 			// avoids a fresh scan of the nested-events directory per run.
-			nestedChildren = projectNestedEvents(nestedRoute)?.children ?? [];
+			nestedChildren = projectNestedChildrenForRun(nestedRoute, status.runId);
 		} catch (error) {
 			nestedWarnings.push(`Nested status unavailable: ${getErrorMessage(error)}`);
 		}
@@ -538,8 +538,10 @@ export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions
 	// load-time restoration (which only wants queued/running runs) skips it
 	// entirely when no active runs match.
 	let nestedRouteIndex: Map<string, NestedRoute> | undefined;
-	const resolveNestedRoute = (rootRunId: string): NestedRoute | undefined => {
+	const resolveNestedRoute = (rootRunId: string, runAsyncDir?: string): NestedRoute | undefined => {
 		if (!includeNested) return undefined;
+		const persisted = runAsyncDir ? findNestedRouteForAsyncRun(runAsyncDir, rootRunId) : undefined;
+		if (persisted) return persisted;
 		if (activeEntries.has(rootRunId)) return findNestedRouteForRootId(rootRunId);
 		if (!nestedRouteIndex) nestedRouteIndex = buildNestedRouteIndex();
 		return nestedRouteIndex.get(rootRunId);
@@ -589,7 +591,7 @@ export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions
 		let nestedRoute: NestedRoute | undefined;
 		if (options.reconcile !== false && includeNested) {
 			try {
-				nestedRoute = resolveNestedRoute(status.runId || path.basename(asyncDir));
+				nestedRoute = resolveNestedRoute(status.runId || path.basename(asyncDir), asyncDir);
 				if (nestedRoute) reconcileNestedAsyncDescendants(nestedRoute, { resultsDir: options.resultsDir, kill: options.kill, now: options.now });
 			} catch (error) {
 				observeStatus?.(null);
